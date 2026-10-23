@@ -657,6 +657,10 @@ abstract class Comix :
                 window.__comixHarvestOptions = { timeoutMs: 45000, settleMs: 4000 };
                 ${asset("harvest_pages.js")}
                 window.__comixHarvestPromise.then(result => {
+                    if (!(result.images || []).length) {
+                        window.$rejectName('No pages found. ' + JSON.stringify(result.debug || result.error || {}).slice(0, 900));
+                        return;
+                    }
                     const payload = {
                         baseUrl: '',
                         items: (result.images || []).map(u => ({ url: u, s: (u.indexOf('?v3') !== -1 || u.indexOf('&v3') !== -1) ? 1 : 0 }))
