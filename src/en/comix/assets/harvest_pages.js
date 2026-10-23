@@ -81,6 +81,80 @@
 
     const NON_CONTENT = /avatar|icon|logo|emoji|emoticon|sprite|placeholder|blank|loading|spinner|profile|userpic|favicon/i;
 
+    // The reader asks the site's own chapter API for its pages, so take them from that response
+    const API_PATH = /^\/api\/v1\/chapters\/[^/]+\/?$/;
+    const apiState = { pages: null };
+    const isPages = (value) => value &&
+        Array.isArray(value.items) &&
+        value.items.length > 0 &&
+        value.items.every((item) => item && typeof item.url === "string");
+    const findPages = (data) => {
+        let best = null;
+        walkJson(data, (value) => {
+            if (!value || typeof value !== "object") return;
+            const candidate = Array.isArray(value) ? { items: value } : value;
+            if (isPages(candidate) && (!best || candidate.items.length > best.items.length)) best = candidate;
+        }, 6);
+        return best;
+    };
+    const isApiUrl = (url) => {
+        try { return API_PATH.test(new URL(String(url), location.href).pathname); } catch (e) { return false; }
+    };
+    const onApiData = (data) => {
+        const pages = findPages(data);
+        if (pages) apiState.pages = pages;
+    };
+    const apiUrls = (pages) => {
+        const base = typeof pages.baseUrl === "string" ? pages.baseUrl.replace(/\/+$/, "") : "";
+        const urls = [];
+        for (const item of pages.items) {
+            let url;
+            try {
+                url = /^https?:\/\//i.test(item.url) || !base
+                    ? new URL(item.url, location.href).href
+                    : base + "/" + item.url.replace(/^\/+/, "");
+            } catch (e) { continue; }
+            if (item.s === 1 && !/[?&]v3(?:[=&]|$)/.test(url)) url += (url.includes("?") ? "&" : "?") + "v3";
+            urls.push(url);
+        }
+        return urls;
+    };
+
+    const originalFetch = window.fetch;
+    if (typeof originalFetch === "function") {
+        window.fetch = function (input) {
+            const promise = originalFetch.apply(this, arguments);
+            try {
+                const url = typeof input === "string" ? input : (input && input.url) || String(input);
+                if (isApiUrl(url)) {
+                    promise.then((response) => {
+                        try { response.clone().json().then(onApiData, () => {}); } catch (e) {  }
+                    }, () => {});
+                }
+            } catch (e) {  }
+            return promise;
+        };
+    }
+    const XHR = window.XMLHttpRequest;
+    if (XHR && XHR.prototype) {
+        const originalOpen = XHR.prototype.open;
+        XHR.prototype.open = function (method, url) {
+            try { this.__comixUrl = String(url); } catch (e) {  }
+            return originalOpen.apply(this, arguments);
+        };
+        const originalSend = XHR.prototype.send;
+        XHR.prototype.send = function () {
+            try {
+                if (isApiUrl(this.__comixUrl)) {
+                    this.addEventListener("load", () => {
+                        try { onApiData(this.responseType === "json" ? this.response : JSON.parse(this.responseText)); } catch (e) {  }
+                    });
+                }
+            } catch (e) {  }
+            return originalSend.apply(this, arguments);
+        };
+    }
+
     const collect = () => {
         const urls = [];
         for (const img of Array.from(document.querySelectorAll("img"))) {
@@ -113,15 +187,23 @@
             });
         }
 
-        let images = collect();
-        if (!images.length) {
-            await waitFor(() => collect().length > 0 || null,
-                { timeoutMs: OPTIONS.timeoutMs, intervalMs: OPTIONS.pollMs });
+        // The host gives up 30s after the data request, so stop waiting before that
+        const waitMs = Math.min(OPTIONS.timeoutMs, 25000);
+        await waitFor(() => apiState.pages || collect().length > 0 || null,
+            { timeoutMs: waitMs, intervalMs: OPTIONS.pollMs });
+
+        let images;
+        let source;
+        if (apiState.pages) {
+            images = apiUrls(apiState.pages);
+            source = "api";
+        } else {
             images = collect();
-        }
-        if (images.length) {
-            images = await waitForStable(() => { nudgeScroll(); return collect(); },
-                { timeoutMs: Math.min(OPTIONS.timeoutMs, 10000), intervalMs: OPTIONS.pollMs, stableRounds: OPTIONS.stableRounds }) || images;
+            source = "dom";
+            if (images.length) {
+                images = await waitForStable(() => { nudgeScroll(); return collect(); },
+                    { timeoutMs: Math.min(OPTIONS.timeoutMs, 10000), intervalMs: OPTIONS.pollMs, stableRounds: OPTIONS.stableRounds }) || images;
+            }
         }
 
         return {
@@ -130,6 +212,7 @@
             mangaHid: here ? here.hid : null,
             chapterNumber: here ? here.number : null,
             corroborated,
+            source,
             count: images.length,
             images,
         };
