@@ -97,9 +97,6 @@
         }, 6);
         return best;
     };
-    const isApiUrl = (url) => {
-        try { return API_PATH.test(new URL(String(url), location.href).pathname); } catch (e) { return false; }
-    };
     const onApiData = (data) => {
         const pages = findPages(data);
         if (pages) apiState.pages = pages;
@@ -120,16 +117,32 @@
         return urls;
     };
 
+    // What the page's API calls returned, shown in the error when no pages are found
+    const debug = { reqs: [] };
+    const apiPathOf = (url) => {
+        try { return new URL(String(url), location.href).pathname; } catch (e) { return ""; }
+    };
+    const track = (path, entry, text) => {
+        if (debug.reqs.length < 8) debug.reqs.push(entry);
+        if (API_PATH.test(path) && typeof text === "string") {
+            entry.b = text.slice(0, 160);
+            try { onApiData(JSON.parse(text)); } catch (e) { entry.parse = "fail"; }
+        }
+    };
+
     const originalFetch = window.fetch;
     if (typeof originalFetch === "function") {
         window.fetch = function (input) {
             const promise = originalFetch.apply(this, arguments);
             try {
                 const url = typeof input === "string" ? input : (input && input.url) || String(input);
-                if (isApiUrl(url)) {
+                const path = apiPathOf(url);
+                if (path.startsWith("/api/")) {
                     promise.then((response) => {
-                        try { response.clone().json().then(onApiData, () => {}); } catch (e) {  }
-                    }, () => {});
+                        const entry = { p: path.slice(0, 50), st: response.status };
+                        if (!API_PATH.test(path)) return track(path, entry);
+                        try { response.clone().text().then((text) => track(path, entry, text), () => track(path, entry)); } catch (e) { track(path, entry); }
+                    }, (error) => track(path, { p: path.slice(0, 50), err: String(error).slice(0, 60) }));
                 }
             } catch (e) {  }
             return promise;
@@ -145,9 +158,15 @@
         const originalSend = XHR.prototype.send;
         XHR.prototype.send = function () {
             try {
-                if (isApiUrl(this.__comixUrl)) {
-                    this.addEventListener("load", () => {
-                        try { onApiData(this.responseType === "json" ? this.response : JSON.parse(this.responseText)); } catch (e) {  }
+                const path = apiPathOf(this.__comixUrl);
+                if (path.startsWith("/api/")) {
+                    this.addEventListener("loadend", () => {
+                        const entry = { p: path.slice(0, 50), st: this.status, x: 1 };
+                        let text;
+                        try {
+                            text = this.responseType === "json" ? JSON.stringify(this.response) : this.responseText;
+                        } catch (e) {  }
+                        track(path, entry, text);
                     });
                 }
             } catch (e) {  }
@@ -169,6 +188,22 @@
             if (!urls.includes(src)) urls.push(src);
         }
         return urls;
+    };
+
+    const pageSnapshot = () => {
+        const imgs = Array.from(document.querySelectorAll("img"));
+        const text = ((document.body && document.body.innerText) || "").replace(/\s+/g, " ").trim();
+        return {
+            path: location.pathname,
+            ready: document.readyState,
+            title: String(document.title || "").slice(0, 60),
+            img: imgs.length,
+            canvas: document.querySelectorAll("canvas").length,
+            iframe: document.querySelectorAll("iframe").length,
+            src: imgs.slice(0, 3).map((img) => String(imageSrc(img) || "").slice(0, 70)),
+            text: text.slice(0, 120),
+            reqs: debug.reqs,
+        };
     };
 
     const nudgeScroll = () => {
@@ -213,6 +248,7 @@
             chapterNumber: here ? here.number : null,
             corroborated,
             source,
+            debug: images.length ? null : pageSnapshot(),
             count: images.length,
             images,
         };
